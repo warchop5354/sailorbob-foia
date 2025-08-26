@@ -1,0 +1,131 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: foia_db
+      POSTGRES_USER: foia_user
+      POSTGRES_PASSWORD: foia_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foia_user -d foia_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.10
+    environment:
+      MEILI_MASTER_KEY: your_meili_master_key_here
+      MEILI_ENV: development
+    ports:
+      - "7700:7700"
+    volumes:
+      - meilisearch_data:/meili_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7700/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: ../infra/docker/Dockerfile.backend
+    volumes:
+      - ./backend:/app
+      - media_files:/app/media
+    ports:
+      - "8000:8000"
+    environment:
+      DEBUG: "true"
+      DATABASE_URL: postgres://foia_user:foia_pass@postgres:5432/foia_db
+      REDIS_URL: redis://redis:6379/0
+      MEILI_HOST: http://meilisearch:7700
+      MEILI_MASTER_KEY: your_meili_master_key_here
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py collectstatic --noinput &&
+             python manage.py runserver 0.0.0.0:8000"
+
+  celery:
+    build:
+      context: ./backend
+      dockerfile: ../infra/docker/Dockerfile.backend
+    volumes:
+      - ./backend:/app
+      - media_files:/app/media
+    environment:
+      DEBUG: "true"
+      DATABASE_URL: postgres://foia_user:foia_pass@postgres:5432/foia_db
+      REDIS_URL: redis://redis:6379/0
+      MEILI_HOST: http://meilisearch:7700
+      MEILI_MASTER_KEY: your_meili_master_key_here
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A foia worker -l info
+
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: ../infra/docker/Dockerfile.backend
+    volumes:
+      - ./backend:/app
+      - media_files:/app/media
+    environment:
+      DEBUG: "true"
+      DATABASE_URL: postgres://foia_user:foia_pass@postgres:5432/foia_db
+      REDIS_URL: redis://redis:6379/0
+      MEILI_HOST: http://meilisearch:7700
+      MEILI_MASTER_KEY: your_meili_master_key_here
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A foia beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+
+  web:
+    build:
+      context: ./web
+      dockerfile: ../infra/docker/Dockerfile.web
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api
+    depends_on:
+      - backend
+    command: npm run dev
+
+volumes:
+  postgres_data:
+  meilisearch_data:
+  media_files:
